@@ -1,4 +1,4 @@
-package com.curse.rat;
+package com.Deviant.pro;
 
 import android.content.Context;
 import android.os.Build;
