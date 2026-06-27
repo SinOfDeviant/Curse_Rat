@@ -1,4 +1,4 @@
-package com.curse.rat;
+package com.Deviant.pro;
 
 import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
